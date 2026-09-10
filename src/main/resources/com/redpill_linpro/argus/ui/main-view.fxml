@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.RadioButton?>
+<?import javafx.scene.control.Spinner?>
+<?import javafx.scene.control.SplitPane?>
+<?import javafx.scene.control.Tab?>
+<?import javafx.scene.control.TabPane?>
+<?import javafx.scene.control.TableColumn?>
+<?import javafx.scene.control.TableView?>
+<?import javafx.scene.control.TextArea?>
+<?import javafx.scene.control.TextField?>
+<?import javafx.scene.control.ToggleGroup?>
+<?import javafx.scene.control.ToolBar?>
+<?import javafx.scene.control.TreeView?>
+<?import javafx.scene.layout.GridPane?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.VBox?>
+
+<VBox xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml"
+      fx:controller="com.redpill_linpro.argus.ui.MainController">
+    <padding>
+        <Insets top="8" right="8" bottom="8" left="8"/>
+    </padding>
+    <ToolBar>
+        <Button fx:id="refreshButton" text="Refresh addresses" onAction="#onRefreshAddresses"/>
+        <Button fx:id="disconnectButton" text="Disconnect" onAction="#onDisconnect"/>
+        <Label fx:id="connectionLabel"/>
+    </ToolBar>
+    <SplitPane VBox.vgrow="ALWAYS">
+        <TreeView fx:id="tree" minWidth="280" prefWidth="340"/>
+        <TabPane>
+            <Tab text="Browse" closable="false">
+                <VBox spacing="6">
+                    <padding>
+                        <Insets top="6" right="6" bottom="6" left="6"/>
+                    </padding>
+                    <HBox spacing="6" alignment="CENTER_LEFT">
+                        <Label text="Queue (browsed):"/>
+                        <Label fx:id="browseQueueLabel" text="-"/>
+                        <Label text="Max:"/>
+                        <Spinner fx:id="maxMessagesSpinner" prefWidth="110" editable="true"/>
+                        <TextField fx:id="selectorField" promptText="JMS selector (optional)" HBox.hgrow="ALWAYS"/>
+                    </HBox>
+                    <SplitPane orientation="VERTICAL" VBox.vgrow="ALWAYS">
+                        <TableView fx:id="messagesTable">
+                            <columns>
+                                <TableColumn fx:id="colId" text="Message ID" prefWidth="230"/>
+                                <TableColumn fx:id="colTimestamp" text="Timestamp" prefWidth="160"/>
+                                <TableColumn fx:id="colType" text="Type" prefWidth="70"/>
+                                <TableColumn fx:id="colPriority" text="Pri" prefWidth="40"/>
+                                <TableColumn fx:id="colDeliveryCount" text="Dlv" prefWidth="40"/>
+                                <TableColumn fx:id="colProps" text="Properties" prefWidth="220"/>
+                                <TableColumn fx:id="colBody" text="Body" prefWidth="340"/>
+                            </columns>
+                            <placeholder>
+                                <Label text="Select a queue and press Browse"/>
+                            </placeholder>
+                        </TableView>
+                        <VBox spacing="6">
+                            <padding>
+                                <Insets top="8"/>
+                            </padding>
+                            <GridPane hgap="8" vgap="4">
+                                <Label text="Message ID" styleClass="detail-key" GridPane.rowIndex="0" GridPane.columnIndex="0"/>
+                                <Label fx:id="headerMessageId" GridPane.rowIndex="0" GridPane.columnIndex="1"/>
+                                <Label text="Correlation ID" styleClass="detail-key" GridPane.rowIndex="1" GridPane.columnIndex="0"/>
+                                <Label fx:id="headerCorrelationId" GridPane.rowIndex="1" GridPane.columnIndex="1"/>
+                                <Label text="Timestamp" styleClass="detail-key" GridPane.rowIndex="2" GridPane.columnIndex="0"/>
+                                <Label fx:id="headerTimestamp" GridPane.rowIndex="2" GridPane.columnIndex="1"/>
+                                <Label text="Expiration" styleClass="detail-key" GridPane.rowIndex="3" GridPane.columnIndex="0"/>
+                                <Label fx:id="headerExpiration" GridPane.rowIndex="3" GridPane.columnIndex="1"/>
+                                <Label text="Priority" styleClass="detail-key" GridPane.rowIndex="4" GridPane.columnIndex="0"/>
+                                <Label fx:id="headerPriority" GridPane.rowIndex="4" GridPane.columnIndex="1"/>
+                                <Label text="Delivery count" styleClass="detail-key" GridPane.rowIndex="5" GridPane.columnIndex="0"/>
+                                <Label fx:id="headerDeliveryCount" GridPane.rowIndex="5" GridPane.columnIndex="1"/>
+                                <Label text="Redelivered" styleClass="detail-key" GridPane.rowIndex="6" GridPane.columnIndex="0"/>
+                                <Label fx:id="headerRedelivered" GridPane.rowIndex="6" GridPane.columnIndex="1"/>
+                                <Label text="Type" styleClass="detail-key" GridPane.rowIndex="7" GridPane.columnIndex="0"/>
+                                <Label fx:id="headerType" GridPane.rowIndex="7" GridPane.columnIndex="1"/>
+                            </GridPane>
+                            <TableView fx:id="messagePropertiesTable" prefHeight="130">
+                                <columns>
+                                    <TableColumn fx:id="colPropName" text="Property" prefWidth="220"/>
+                                    <TableColumn fx:id="colPropValue" text="Value" prefWidth="480"/>
+                                </columns>
+                            </TableView>
+                            <TextArea fx:id="bodyArea" editable="false" wrapText="true" VBox.vgrow="ALWAYS"/>
+                        </VBox>
+                    </SplitPane>
+                </VBox>
+            </Tab>
+            <Tab text="Send" closable="false">
+                <VBox spacing="6">
+                    <padding>
+                        <Insets top="6" right="6" bottom="6" left="6"/>
+                    </padding>
+                    <HBox spacing="6" alignment="CENTER_LEFT">
+                        <Label text="Destination:"/>
+                        <TextField fx:id="sendDestinationField" promptText="name" prefWidth="240"/>
+                        <fx:define>
+                            <ToggleGroup fx:id="destinationTypeGroup"/>
+                            <ToggleGroup fx:id="bodyKindGroup"/>
+                        </fx:define>
+                        <RadioButton fx:id="queueRadio" toggleGroup="$destinationTypeGroup" text="Queue" selected="true"/>
+                        <RadioButton fx:id="topicRadio" toggleGroup="$destinationTypeGroup" text="Topic"/>
+                        <Label text="Body:"/>
+                        <RadioButton fx:id="textBodyRadio" toggleGroup="$bodyKindGroup" text="Text" selected="true"/>
+                        <RadioButton fx:id="bytesBodyRadio" toggleGroup="$bodyKindGroup" text="Bytes (UTF-8)"/>
+                    </HBox>
+                    <TextArea fx:id="sendBodyArea" promptText="Message body" wrapText="true" VBox.vgrow="ALWAYS"/>
+                    <TextArea fx:id="sendPropertiesArea" promptText="Message properties, one per line: key = value"
+                              prefHeight="110" wrapText="false"/>
+                    <HBox spacing="10" alignment="CENTER_LEFT">
+                        <Button fx:id="sendButton" text="Send" onAction="#onSend"/>
+                        <Label fx:id="sendStatusLabel"/>
+                    </HBox>
+                </VBox>
+            </Tab>
+            <Tab text="Details" closable="false">
+                <TextArea fx:id="detailsArea" editable="false" wrapText="true"/>
+            </Tab>
+        </TabPane>
+    </SplitPane>
+    <HBox alignment="CENTER_LEFT" spacing="10">
+        <padding>
+            <Insets top="6"/>
+        </padding>
+        <Label fx:id="statusLabel" text="Ready"/>
+    </HBox>
+</VBox>

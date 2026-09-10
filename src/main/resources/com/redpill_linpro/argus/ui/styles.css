@@ -1,0 +1,13 @@
+.detail-key {
+    -fx-font-weight: bold;
+    -fx-text-fill: #555;
+}
+
+.status-error {
+    -fx-text-fill: #b00020;
+    -fx-font-weight: bold;
+}
+
+.root {
+    -fx-font-size: 13px;
+}
