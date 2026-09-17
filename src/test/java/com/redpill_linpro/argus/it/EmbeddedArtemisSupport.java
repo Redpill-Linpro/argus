@@ -46,10 +46,13 @@ public final class EmbeddedArtemisSupport {
             config.addAcceptorConfiguration("core", "tcp://127.0.0.1:" + port);
         }
 
-        config.putSecurityRoles("activemq.management", java.util.Set.of(full("argus-role")));
-        config.putSecurityRoles("activemq.management.#", java.util.Set.of(full("argus-role")));
+        config.putSecurityRoles("#", java.util.Set.of(appRole("argus-role")));
+        config.putSecurityRoles("activemq.management", java.util.Set.of(sendAndManage("argus-role")));
+        config.putSecurityRoles("activemq.management.#", java.util.Set.of(sendAndManage("argus-role")));
         config.putSecurityRoles("TEST", java.util.Set.of(full("argus-role")));
         config.putSecurityRoles("TEST2", java.util.Set.of(full("argus-role"), sendOnly("restricted-role")));
+        config.putSecurityRoles("TESTM", java.util.Set.of(full("argus-role")));
+        config.putSecurityRoles("TESTM.#", java.util.Set.of(full("argus-role")));
         config.putSecurityRoles("OW.#", java.util.Set.of(full("argus-role")));
         config.putSecurityRoles("ActiveMQ.Advisory.#", java.util.Set.of(full("argus-role")));
 
@@ -76,6 +79,9 @@ public final class EmbeddedArtemisSupport {
         server.addAddressInfo(new org.apache.activemq.artemis.core.server.impl.AddressInfo(
                 org.apache.activemq.artemis.api.core.SimpleString.of("TEST2"),
                 org.apache.activemq.artemis.api.core.RoutingType.ANYCAST));
+        server.addAddressInfo(new org.apache.activemq.artemis.core.server.impl.AddressInfo(
+                org.apache.activemq.artemis.api.core.SimpleString.of("TESTM"),
+                org.apache.activemq.artemis.api.core.RoutingType.MULTICAST));
         server.createQueue(new org.apache.activemq.artemis.api.core.QueueConfiguration("TESTQ")
                 .setAddress("TEST").setDurable(false)
                 .setRoutingType(org.apache.activemq.artemis.api.core.RoutingType.ANYCAST));
@@ -103,6 +109,14 @@ public final class EmbeddedArtemisSupport {
 
     private static Role full(String name) {
         return new Role(name, true, true, true, true, true, true, true, true, true, true, true, true);
+    }
+
+    private static Role sendAndManage(String name) {
+        return new Role(name, true, false, false, false, false, false, true, false, false, false, false, false);
+    }
+
+    private static Role appRole(String name) {
+        return new Role(name, true, true, true, true, true, false, true, true, true, true, true, true);
     }
 
     private static Role sendOnly(String name) {

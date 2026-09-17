@@ -6,8 +6,8 @@ Argus is a desktop application for Windows, macOS and Linux.
 
 - A broker account on ActiveMQ Artemis with (at minimum) `browse` permission for the
   queues you want to read and `send` permission for the addresses you want to write to.
-  Listing addresses additionally requires `manage` permission on `activemq.management`
-  — see [permissions.md](permissions.md).
+  Listing addresses additionally requires the management permissions on
+  `activemq.management` — see [permissions.md](permissions.md).
 - Network access to the broker's core/OpenWire port (typically `61616`, plus TLS variant).
 
 ## Run from source (any platform)

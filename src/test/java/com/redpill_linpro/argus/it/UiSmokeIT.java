@@ -36,6 +36,7 @@ import com.redpill_linpro.argus.model.MessageDraft;
 import com.redpill_linpro.argus.model.MessageSnapshot;
 import com.redpill_linpro.argus.model.Protocol;
 import com.redpill_linpro.argus.model.QueueInfo;
+import com.redpill_linpro.argus.ui.AddAddressDialog;
 import com.redpill_linpro.argus.ui.ConnectionDialog;
 import com.redpill_linpro.argus.ui.MainController;
 
@@ -216,6 +217,19 @@ class UiSmokeIT {
             Method m = target.getClass().getDeclaredMethod(method);
             m.setAccessible(true);
             m.invoke(target);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static void invoke(Object target, String method, Object... args) {
+        try {
+            Class<?>[] types = java.util.Arrays.stream(args)
+                    .map(Object::getClass)
+                    .toArray(Class<?>[]::new);
+            Method m = target.getClass().getDeclaredMethod(method, types);
+            m.setAccessible(true);
+            m.invoke(target, args);
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
@@ -700,6 +714,119 @@ class UiSmokeIT {
                         return selected != null
                                 && selected.getValue() instanceof QueueInfo
                                 && "TEST".equals(((QueueInfo) selected.getValue()).address());
+                    });
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+
+            runFx(controller::shutdown);
+        } finally {
+            if (fxRunning.get()) {
+                runFx(() -> {
+                    try {
+                        BrokerClient client = field(controller, "client");
+                        if (client != null) {
+                            client.close();
+                        }
+                    } catch (Exception ignored) {
+                    }
+                });
+            }
+        }
+    }
+
+    @Test
+    @Order(5)
+    void manualAddressEntriesSurviveRefresh() throws Exception {
+        ensureFx();
+        MainController controller = loadController();
+        try {
+            TreeView<Object> tree = field(controller, "tree");
+            await("addresses to load in tree", () -> {
+                try {
+                    return runFx(() -> {
+                        TreeItem<Object> root = tree.getRoot();
+                        return root != null && !root.getChildren().isEmpty();
+                    });
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+
+            runFx(() -> {
+                AddAddressDialog dialog = new AddAddressDialog();
+                assertNotNull(dialog.getDialogPane().getContent(), "add-address dialog content should build");
+                ButtonType addButtonType = dialog.getDialogPane().getButtonTypes().stream()
+                        .filter(bt -> "Add".equals(bt.getText()))
+                        .findFirst().orElseThrow();
+                assertNotNull(dialog.getDialogPane().lookupButton(addButtonType), "Add button must exist");
+                dialog.close();
+            });
+
+            runFx(() -> invoke(controller, "addManualDestination", "GHOST.ADDR", "GHOST.Q"));
+
+            await("manual address with queue child in tree", () -> {
+                try {
+                    return runFx(() -> {
+                        TreeItem<Object> root = tree.getRoot();
+                        if (root == null) {
+                            return false;
+                        }
+                        for (TreeItem<Object> child : root.getChildren()) {
+                            if (child.getValue() instanceof AddressInfo info
+                                    && "GHOST.ADDR".equals(info.name())) {
+                                return child.getChildren().stream().anyMatch(q ->
+                                        q.getValue() instanceof QueueInfo qi
+                                                && "GHOST.Q".equals(qi.name()));
+                            }
+                        }
+                        return false;
+                    });
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+            await("manual queue child selected", () -> {
+                try {
+                    return runFx((Callable<Boolean>) () -> {
+                        TreeItem<Object> selected = tree.getSelectionModel().getSelectedItem();
+                        return selected != null
+                                && selected.getValue() instanceof QueueInfo qi
+                                && "GHOST.Q".equals(qi.name());
+                    });
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+
+            AtomicReference<TreeItem<Object>> rootBefore = new AtomicReference<>();
+            rootBefore.set(runFx((Callable<TreeItem<Object>>) tree::getRoot));
+            runFx(() -> invoke(controller, "onRefreshAddresses"));
+            await("tree root replaced by refresh", () -> {
+                try {
+                    return runFx((Callable<Boolean>) () -> tree.getRoot() != null
+                            && tree.getRoot() != rootBefore.get());
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+            await("manual entry survives refresh", () -> {
+                try {
+                    return runFx(() -> {
+                        TreeItem<Object> root = tree.getRoot();
+                        if (root == null) {
+                            return false;
+                        }
+                        for (TreeItem<Object> child : root.getChildren()) {
+                            if (child.getValue() instanceof AddressInfo info
+                                    && "GHOST.ADDR".equals(info.name())) {
+                                return child.getChildren().stream().anyMatch(q ->
+                                        q.getValue() instanceof QueueInfo qi
+                                                && "GHOST.Q".equals(qi.name()));
+                            }
+                        }
+                        return false;
                     });
                 } catch (Exception e) {
                     return false;

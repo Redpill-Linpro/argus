@@ -17,6 +17,7 @@ import com.redpill_linpro.argus.model.MessageSnapshot;
 import com.redpill_linpro.argus.model.QueueInfo;
 import com.redpill_linpro.argus.util.JmsMessageReader;
 import com.redpill_linpro.argus.util.MessageDraftFactory;
+import com.redpill_linpro.argus.util.TlsContextFactory;
 
 import jakarta.jms.ConnectionMetaData;
 import jakarta.jms.JMSException;
@@ -49,14 +50,28 @@ public final class OpenWireBrokerClient implements BrokerClient {
             org.apache.activemq.ActiveMQConnectionFactory cf =
                     new org.apache.activemq.ActiveMQConnectionFactory(url);
             cf.setTrustAllPackages(false);
-            this.connection = (ActiveMQConnection) cf.createConnection(
-                    blankToNull(profile.username()), blankToNull(profile.password()));
+            this.connection = connect(cf);
             this.connection.start();
             open.set(true);
         } catch (Exception e) {
             closeQuietly();
             throw new BrokerException("Cannot connect to " + url + ": " + rootMessage(e), e);
         }
+    }
+
+    private ActiveMQConnection connect(org.apache.activemq.ActiveMQConnectionFactory cf) throws Exception {
+        if (profile.hasTrustStore() || profile.hasKeyStore()) {
+            org.apache.activemq.broker.SslContext ctx = TlsContextFactory.openWireContext(profile);
+            try {
+                org.apache.activemq.broker.SslContext.setCurrentSslContext(ctx);
+                return (ActiveMQConnection) cf.createConnection(
+                        blankToNull(profile.username()), blankToNull(profile.password()));
+            } finally {
+                org.apache.activemq.broker.SslContext.setCurrentSslContext(null);
+            }
+        }
+        return (ActiveMQConnection) cf.createConnection(
+                blankToNull(profile.username()), blankToNull(profile.password()));
     }
 
     private String openWireUrl() {
@@ -102,9 +117,18 @@ public final class OpenWireBrokerClient implements BrokerClient {
             knownTopics = topicsCapture;
         } catch (Exception e) {
             advisoryError = true;
+            BrokerException listingDenied = new BrokerException("Failed to list addresses: " + rootMessage(e), e);
+            if (listingDenied.isAccessDenied()) {
+                throw listingDenied;
+            }
         }
         addresses.sort((a, b) -> a.name().compareToIgnoreCase(b.name()));
         return addresses;
+    }
+
+    @Override
+    public long messageCount(String address, String queueName) {
+        return -1;
     }
 
     @Override
@@ -152,6 +176,70 @@ public final class OpenWireBrokerClient implements BrokerClient {
             return messages;
         } catch (JMSException e) {
             throw new BrokerException("Browse failed for queue '" + queueName + "': " + rootMessage(e), e);
+        }
+    }
+
+    @Override
+    public Subscription subscribe(String address, String selector, java.util.function.Consumer<MessageSnapshot> listener) {
+        Session session = null;
+        try {
+            session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            ActiveMQTopic topic = new ActiveMQTopic(address);
+            String trimmed = blankToNull(selector);
+            jakarta.jms.MessageConsumer consumer = trimmed == null
+                    ? session.createConsumer(topic)
+                    : session.createConsumer(topic, trimmed);
+            consumer.setMessageListener(message -> {
+                try {
+                    listener.accept(JmsMessageReader.read(message));
+                } catch (JMSException e) {
+                    throw new BrokerException("Failed to read subscribed message: " + rootMessage(e), e);
+                }
+            });
+            OpenWireSubscriptionImpl subscription = new OpenWireSubscriptionImpl(address, consumer, session);
+            session = null;
+            return subscription;
+        } catch (JMSException e) {
+            if (session != null) {
+                try {
+                    session.close();
+                } catch (Exception ignored) {
+                }
+            }
+            throw new BrokerException("Subscribe to '" + address + "' failed: " + rootMessage(e), e);
+        }
+    }
+
+    private static final class OpenWireSubscriptionImpl implements Subscription {
+
+        private final String address;
+        private final jakarta.jms.MessageConsumer consumer;
+        private final Session session;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
+
+        private OpenWireSubscriptionImpl(String address, jakarta.jms.MessageConsumer consumer, Session session) {
+            this.address = address;
+            this.consumer = consumer;
+            this.session = session;
+        }
+
+        @Override
+        public String address() {
+            return address;
+        }
+
+        @Override
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                try {
+                    consumer.close();
+                } catch (Exception ignored) {
+                }
+                try {
+                    session.close();
+                } catch (Exception ignored) {
+                }
+            }
         }
     }
 

@@ -1,9 +1,14 @@
 package com.redpill_linpro.argus.it;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -11,7 +16,9 @@ import org.junit.jupiter.api.Test;
 
 import org.apache.activemq.artemis.core.server.ActiveMQServer;
 
+import com.redpill_linpro.argus.broker.BrokerException;
 import com.redpill_linpro.argus.broker.OpenWireBrokerClient;
+import com.redpill_linpro.argus.broker.Subscription;
 import com.redpill_linpro.argus.model.AddressInfo;
 import com.redpill_linpro.argus.model.ConnectionProfile;
 import com.redpill_linpro.argus.model.DestinationType;
@@ -39,6 +46,23 @@ class OpenWireBrokerClientIT {
     private static ConnectionProfile profile() {
         return new ConnectionProfile("it-openwire", Protocol.OPENWIRE, "127.0.0.1", port,
                 "argus", "arguspw", false, false);
+    }
+
+    private static ConnectionProfile profile(String user, String password) {
+        return new ConnectionProfile("it-openwire", Protocol.OPENWIRE, "127.0.0.1", port,
+                user, password, false, false);
+    }
+
+    @Test
+    void listingDeniedWithoutAdvisoryPermissions() {
+        try {
+            new OpenWireBrokerClient(profile("restricted", "restrictedpw"));
+            fail("expected listing denial at connect");
+        } catch (BrokerException e) {
+            assertTrue(e.isAccessDenied(), "expected access denied, got: " + e.getMessage());
+            assertTrue(e.getMessage().contains("ActiveMQ.Advisory"),
+                    "expected advisory destination denied in: " + e.getMessage());
+        }
     }
 
     @Test
@@ -84,6 +108,23 @@ class OpenWireBrokerClientIT {
             assertEquals(1, queues.size());
             assertEquals("ANYCAST", queues.get(0).routingType());
             assertEquals(-1, queues.get(0).messageCount());
+        }
+    }
+
+    @Test
+    void subscribesToMulticastAddressAndReceivesLiveMessages() throws Exception {
+        try (OpenWireBrokerClient client = new OpenWireBrokerClient(profile())) {
+            BlockingQueue<MessageSnapshot> received = new LinkedBlockingQueue<>();
+            Subscription sub = client.subscribe("OW.T1", null, received::add);
+            try {
+                client.send("OW.T1", DestinationType.TOPIC,
+                        new MessageDraft(MessageDraft.Kind.TEXT, "ow-live", java.util.Map.of()));
+                MessageSnapshot got = received.poll(15, TimeUnit.SECONDS);
+                assertNotNull(got, "expected a live topic message");
+                assertEquals("ow-live", got.body());
+            } finally {
+                sub.close();
+            }
         }
     }
 }

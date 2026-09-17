@@ -12,7 +12,7 @@ The **Send** tab composes and sends a message.
    as boolean, integers, decimals, anything else as string. Lines starting with `#`
    are ignored.
 4. Press **Send**. (Note: browsing queues is triggered by double-clicking them in the
-   tree — the Browse tab has no button of its own.)
+   tree — the Subscribe tab has no browse button of its own.)
 
 ## Notes
 

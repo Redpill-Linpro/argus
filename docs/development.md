@@ -19,9 +19,9 @@ mvn -DskipTests package  # jar only
 - **Integration tests** (`*IT`, failsafe, part of `mvn verify`): start an **embedded Artemis
   broker** (`it/EmbeddedArtemisSupport`) with JAAS properties login (users `argus`/`restricted`)
   and exercise both protocol clients for real: `CoreBrokerClientIT` (management listing,
-  browse + selector + max, browse-denied, listing-denied) and `OpenWireBrokerClientIT`
-  (advisory-based listing, browse + selector).
-- `UiSmokeIT` drives the real FXML UI end-to-end (connect, tree, browse, send, screenshot to
+  browse + selector + max, browse-denied, listing-denied, multicast subscribe + selector),
+  `OpenWireBrokerClientIT` (advisory-based listing, browse + selector, multicast subscribe)
+  and `UiSmokeIT` drives the real FXML UI end-to-end (connect, tree, browse, send, screenshot to
   `target/ui-smoke.png` against an embedded broker). It needs an X display; without one it is
   skipped. Headless run (with Docker):
 
@@ -41,12 +41,14 @@ mvn -DskipTests package  # jar only
 
 `ui/` (JavaFX controllers + FXML) drives everything through the `broker/BrokerClient`
 interface. `broker/CoreBrokerClient` talks to Artemis over the core protocol: listing
-via management *messages* on `activemq.management` (`ManagementHelper` + `ClientRequestor`,
-attribute/operation names mirroring `AddressControl`/`QueueControl`), browsing/sending via
-the Artemis JMS client (QueueBrowser, FQQN `address::queue`). `broker/OpenWireBrokerClient`
+via management *messages* on `activemq.management` (`ManagementHelper` + a requestor
+with a neutral temporary reply queue `argus-reply-…`, attribute/operation names mirroring
+`AddressControl`/`QueueControl`), browsing/sending via
+the Artemis JMS client (QueueBrowser, FQQN `address::queue`), topic subscriptions via a JMS
+message consumer with a listener. `broker/OpenWireBrokerClient`
 talks OpenWire using `activemq-client` (6.x, jakarta): listing via `DestinationSource`
-advisories (best effort), browsing/sending via JMS. Model types are immutable records.
-Connection profiles persist as JSON via Jackson in `config/ProfileStore`.
+advisories (best effort), browsing/sending/subscribing via JMS. Model types are immutable
+records. Connection profiles persist as JSON via Jackson in `config/ProfileStore`.
 
 ## Invariants (see AGENTS.md)
 

@@ -3,16 +3,21 @@ package com.redpill_linpro.argus.broker;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.apache.activemq.artemis.api.core.QueueConfiguration;
+import org.apache.activemq.artemis.api.core.SimpleString;
 import org.apache.activemq.artemis.api.core.client.ActiveMQClient;
+import org.apache.activemq.artemis.api.core.client.ClientConsumer;
 import org.apache.activemq.artemis.api.core.client.ClientMessage;
-import org.apache.activemq.artemis.api.core.client.ClientRequestor;
+import org.apache.activemq.artemis.api.core.client.ClientProducer;
 import org.apache.activemq.artemis.api.core.client.ClientSession;
 import org.apache.activemq.artemis.api.core.client.ClientSessionFactory;
 import org.apache.activemq.artemis.api.core.client.ServerLocator;
 import org.apache.activemq.artemis.api.core.management.ManagementHelper;
 import org.apache.activemq.artemis.api.core.management.ResourceNames;
+import org.apache.activemq.artemis.core.client.impl.ClientMessageImpl;
 
 import com.redpill_linpro.argus.model.AddressInfo;
 import com.redpill_linpro.argus.model.ConnectionProfile;
@@ -22,12 +27,15 @@ import com.redpill_linpro.argus.model.MessageSnapshot;
 import com.redpill_linpro.argus.model.QueueInfo;
 import com.redpill_linpro.argus.util.JmsMessageReader;
 import com.redpill_linpro.argus.util.MessageDraftFactory;
+import com.redpill_linpro.argus.util.TlsContextFactory;
 
 import jakarta.jms.JMSException;
+import jakarta.jms.MessageConsumer;
 import jakarta.jms.MessageProducer;
 import jakarta.jms.Queue;
 import jakarta.jms.QueueBrowser;
 import jakarta.jms.Session;
+import jakarta.jms.Topic;
 
 public final class CoreBrokerClient implements BrokerClient {
 
@@ -41,6 +49,9 @@ public final class CoreBrokerClient implements BrokerClient {
     private final ClientSessionFactory factory;
     private final ClientSession managementSession;
     private final jakarta.jms.Connection jmsConnection;
+    private SimpleString replyQueueName;
+    private ClientConsumer replyConsumer;
+    private ClientProducer requestProducer;
 
     public CoreBrokerClient(ConnectionProfile profile) {
         this.profile = profile;
@@ -50,6 +61,7 @@ public final class CoreBrokerClient implements BrokerClient {
                     new org.apache.activemq.artemis.jms.client.ActiveMQJMSConnectionFactory(
                             url, blankToNull(profile.username()), blankToNull(profile.password()));
             this.jmsConnection = jmsFactory.createConnection();
+            this.jmsConnection.start();
             this.locator = ActiveMQClient.createServerLocator(url);
             this.factory = locator.createSessionFactory();
             this.managementSession = factory.createSession(
@@ -65,7 +77,7 @@ public final class CoreBrokerClient implements BrokerClient {
 
     private String coreUrl() {
         String url = "tcp://" + profile.url();
-        return profile.ssl() ? url + "?sslEnabled=true" : url;
+        return profile.ssl() ? url + "?sslEnabled=true" + TlsContextFactory.coreUrlParams(profile) : url;
     }
 
     @Override
@@ -100,6 +112,11 @@ public final class CoreBrokerClient implements BrokerClient {
         }
         result.sort((a, b) -> a.name().compareToIgnoreCase(b.name()));
         return result;
+    }
+
+    @Override
+    public long messageCount(String address, String queueName) {
+        return longOf(attributeOrNull(ResourceNames.QUEUE + queueName, "messageCount"));
     }
 
     @Override
@@ -192,6 +209,70 @@ public final class CoreBrokerClient implements BrokerClient {
         }
     }
 
+    @Override
+    public Subscription subscribe(String address, String selector, java.util.function.Consumer<MessageSnapshot> listener) {
+        Session session = null;
+        try {
+            session = jmsConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            Topic topic = session.createTopic(address);
+            String trimmed = blankToNull(selector);
+            MessageConsumer consumer = trimmed == null
+                    ? session.createConsumer(topic)
+                    : session.createConsumer(topic, trimmed);
+            consumer.setMessageListener(message -> {
+                try {
+                    listener.accept(JmsMessageReader.read(message));
+                } catch (JMSException e) {
+                    throw new BrokerException("Failed to read subscribed message: " + rootMessage(e), e);
+                }
+            });
+            CoreSubscriptionImpl subscription = new CoreSubscriptionImpl(address, consumer, session);
+            session = null;
+            return subscription;
+        } catch (JMSException e) {
+            if (session != null) {
+                try {
+                    session.close();
+                } catch (Exception ignored) {
+                }
+            }
+            throw new BrokerException("Subscribe to '" + address + "' failed: " + rootMessage(e), e);
+        }
+    }
+
+    private static final class CoreSubscriptionImpl implements Subscription {
+
+        private final String address;
+        private final MessageConsumer consumer;
+        private final Session session;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
+
+        private CoreSubscriptionImpl(String address, MessageConsumer consumer, Session session) {
+            this.address = address;
+            this.consumer = consumer;
+            this.session = session;
+        }
+
+        @Override
+        public String address() {
+            return address;
+        }
+
+        @Override
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                try {
+                    consumer.close();
+                } catch (Exception ignored) {
+                }
+                try {
+                    session.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
     private static String fqqn(String address, String queueName) {
         if (address != null && !address.isBlank() && !address.equals(queueName)) {
             return address + "::" + queueName;
@@ -200,7 +281,7 @@ public final class CoreBrokerClient implements BrokerClient {
     }
 
     private Object[] operation(String resource, String operation, Object... parameters) {
-        Object result = request(resource, requestor -> {
+        Object result = request(resource, () -> {
             ClientMessage message = managementSession.createMessage(false);
             ManagementHelper.putOperationInvocation(message, resource, operation, parameters);
             return message;
@@ -217,7 +298,7 @@ public final class CoreBrokerClient implements BrokerClient {
     }
 
     private Object attributeOrNull(String resource, String attributeName) {
-        return request(resource, requestor -> {
+        return request(resource, () -> {
             ClientMessage message = managementSession.createMessage(false);
             ManagementHelper.putAttribute(message, resource, attributeName);
             return message;
@@ -225,12 +306,19 @@ public final class CoreBrokerClient implements BrokerClient {
     }
 
     private interface RequestSetup {
-        ClientMessage message(ClientRequestor requestor) throws Exception;
+        ClientMessage message() throws Exception;
     }
 
     private Object request(String resource, RequestSetup setup) {
-        try (ClientRequestor requestor = new ClientRequestor(managementSession, MANAGEMENT_ADDRESS)) {
-            ClientMessage reply = requestor.request(setup.message(requestor), MANAGEMENT_TIMEOUT_MS);
+        try {
+            ensureReplyInfrastructure();
+            ClientMessage request = setup.message();
+            request.putStringProperty(ClientMessageImpl.REPLYTO_HEADER_NAME, replyQueueName);
+            requestProducer.send(request);
+            ClientMessage reply = replyConsumer.receive(MANAGEMENT_TIMEOUT_MS);
+            if (reply == null) {
+                throw new BrokerException("Management request on '" + resource + "' timed out");
+            }
             if (!ManagementHelper.hasOperationSucceeded(reply)) {
                 Object failure = ManagementHelper.getResult(reply);
                 String failureText = failure == null ? "management request failed" : String.valueOf(failure);
@@ -244,8 +332,37 @@ public final class CoreBrokerClient implements BrokerClient {
         } catch (BrokerException e) {
             throw e;
         } catch (Exception e) {
+            releaseReplyInfrastructure();
             throw new BrokerException("Management request on '" + resource + "' failed: " + rootMessage(e), e);
         }
+    }
+
+    private void ensureReplyInfrastructure() throws Exception {
+        if (replyConsumer != null) {
+            return;
+        }
+        replyQueueName = SimpleString.of("argus-reply-" + UUID.randomUUID());
+        managementSession.createQueue(QueueConfiguration.of(replyQueueName).setDurable(false).setTemporary(true));
+        replyConsumer = managementSession.createConsumer(replyQueueName);
+        requestProducer = managementSession.createProducer(MANAGEMENT_ADDRESS);
+    }
+
+    private void releaseReplyInfrastructure() {
+        try {
+            if (replyConsumer != null) {
+                replyConsumer.close();
+            }
+            if (requestProducer != null) {
+                requestProducer.close();
+            }
+            if (replyQueueName != null) {
+                managementSession.deleteQueue(replyQueueName);
+            }
+        } catch (Exception ignored) {
+        }
+        replyConsumer = null;
+        requestProducer = null;
+        replyQueueName = null;
     }
 
     private static Object[] asArray(Object result) {
@@ -295,6 +412,7 @@ public final class CoreBrokerClient implements BrokerClient {
     }
 
     private void closeResources() {
+        releaseReplyInfrastructure();
         try {
             jmsConnection.close();
         } catch (Exception ignored) {

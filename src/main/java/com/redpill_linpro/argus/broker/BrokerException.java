@@ -21,14 +21,28 @@ public class BrokerException extends RuntimeException {
         return accessDenied;
     }
 
+    public static boolean indicatesAccessDenied(String message) {
+        if (message == null) {
+            return false;
+        }
+        return message.contains("does not have permission")
+                || message.contains("is not authorized")
+                || message.contains("AMQ229123")
+                || message.contains("AMQ229212")
+                || message.contains("AMQ229213");
+    }
+
     private static boolean isSecurityCause(Throwable cause) {
         while (cause != null) {
             String name = cause.getClass().getName();
-            if (name.endsWith("JMSSecurityException")
-                    || name.endsWith("ActiveMQSecurityException")
-                    || name.endsWith("ActiveMQNotConnectedException")) {
-                return name.endsWith("JMSSecurityException")
-                        || name.endsWith("ActiveMQSecurityException");
+            if (name.endsWith("JMSSecurityException") || name.endsWith("ActiveMQSecurityException")) {
+                return true;
+            }
+            if (name.endsWith("ActiveMQNotConnectedException")) {
+                return false;
+            }
+            if (indicatesAccessDenied(cause.getMessage())) {
+                return true;
             }
             cause = cause.getCause();
         }

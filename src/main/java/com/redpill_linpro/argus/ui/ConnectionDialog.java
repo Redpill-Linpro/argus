@@ -1,5 +1,8 @@
 package com.redpill_linpro.argus.ui;
 
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
@@ -27,6 +30,8 @@ import javafx.scene.control.Tooltip;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.stage.FileChooser;
+import javafx.stage.Window;
 
 public final class ConnectionDialog extends Dialog<ConnectionProfile> {
 
@@ -39,10 +44,15 @@ public final class ConnectionDialog extends Dialog<ConnectionProfile> {
     private final TextField portField = new TextField("61616");
     private final TextField userField = new TextField();
     private final PasswordField passwordField = new PasswordField();
-    private final CheckBox sslBox = new CheckBox("Use SSL");
+    private final CheckBox sslBox = new CheckBox("Use TLS");
     private final CheckBox savePasswordBox = new CheckBox("Save password");
+    private final TextField trustStoreField = new TextField();
+    private final PasswordField trustStorePasswordField = new PasswordField();
+    private final TextField keyStoreField = new TextField();
+    private final PasswordField keyStorePasswordField = new PasswordField();
     private final Label statusLabel = new Label();
     private final AtomicReference<BrokerClient> createdClient = new AtomicReference<>();
+    private volatile ConnectionProfile connectedProfile;
 
     public ConnectionDialog(ProfileStore store) {
         this.store = store;
@@ -50,7 +60,8 @@ public final class ConnectionDialog extends Dialog<ConnectionProfile> {
         setHeaderText("Connect to ActiveMQ Artemis");
 
         ButtonType connectButtonType = new ButtonType("Connect", ButtonType.OK.getButtonData());
-        getDialogPane().getButtonTypes().addAll(connectButtonType, ButtonType.CANCEL);
+        ButtonType exitButtonType = new ButtonType("Exit", javafx.scene.control.ButtonBar.ButtonData.CANCEL_CLOSE);
+        getDialogPane().getButtonTypes().addAll(connectButtonType, exitButtonType);
 
         protocolBox.getItems().addAll(Protocol.values());
         protocolBox.getSelectionModel().selectFirst();
@@ -95,6 +106,10 @@ public final class ConnectionDialog extends Dialog<ConnectionProfile> {
         HBox boxes = new HBox(16, sslBox, savePasswordBox);
         grid.add(boxes, 1, row);
         row++;
+        row = addTlsField(grid, row, "Truststore", createStoreField(trustStoreField));
+        row = addTlsField(grid, row, "Truststore password", trustStorePasswordField);
+        row = addTlsField(grid, row, "Keystore", createStoreField(keyStoreField));
+        row = addTlsField(grid, row, "Keystore password", keyStorePasswordField);
         grid.add(statusLabel, 0, row);
         GridPane.setColumnSpan(statusLabel, 2);
 
@@ -113,6 +128,59 @@ public final class ConnectionDialog extends Dialog<ConnectionProfile> {
         });
     }
 
+    private int addTlsField(GridPane grid, int row, String label, javafx.scene.layout.Region input) {
+        Label fieldLabel = new Label(label);
+        fieldLabel.visibleProperty().bind(sslBox.selectedProperty());
+        fieldLabel.managedProperty().bind(sslBox.selectedProperty());
+        input.visibleProperty().bind(sslBox.selectedProperty());
+        input.managedProperty().bind(sslBox.selectedProperty());
+        grid.add(fieldLabel, 0, row);
+        grid.add(input, 1, row);
+        GridPane.setHgrow(input, Priority.ALWAYS);
+        return row + 1;
+    }
+
+    private HBox createStoreField(TextField field) {
+        Button browseButton = new Button("Browse...");
+        browseButton.setOnAction(event -> {
+            FileChooser chooser = new FileChooser();
+            chooser.setTitle("Select keystore file");
+            chooser.getExtensionFilters().addAll(
+                    new FileChooser.ExtensionFilter(
+                            "Keystore files (*.p12, *.pfx, *.pkcs12, *.keystore, *.jks)",
+                            "*.p12", "*.pfx", "*.pkcs12", "*.keystore", "*.jks"),
+                    new FileChooser.ExtensionFilter("All files (*.*)", "*.*"));
+            chooser.setInitialDirectory(initialDirectory(field));
+            Window window = null;
+            var scene = getDialogPane().getScene();
+            if (scene != null) {
+                window = scene.getWindow();
+            }
+            File selected = chooser.showOpenDialog(window);
+            if (selected != null) {
+                field.setText(selected.getAbsolutePath());
+            }
+        });
+        HBox box = new HBox(6, field, browseButton);
+        HBox.setHgrow(field, Priority.ALWAYS);
+        return box;
+    }
+
+    private static File initialDirectory(TextField field) {
+        String current = field.getText();
+        if (current != null && !current.isBlank()) {
+            Path path = Path.of(current.trim()).toAbsolutePath();
+            if (Files.isDirectory(path)) {
+                return path.toFile();
+            }
+            Path parent = path.getParent();
+            if (parent != null && Files.isDirectory(parent)) {
+                return parent.toFile();
+            }
+        }
+        return new File(System.getProperty("user.home"));
+    }
+
     private void applyProfile(List<ConnectionProfile> profiles) {
         String selected = profileNameBox.getValue();
         if (selected == null) {
@@ -128,6 +196,10 @@ public final class ConnectionDialog extends Dialog<ConnectionProfile> {
                     userField.setText(p.username() == null ? "" : p.username());
                     passwordField.setText(p.password() == null ? "" : p.password());
                     sslBox.setSelected(p.ssl());
+                    trustStoreField.setText(p.trustStorePath() == null ? "" : p.trustStorePath());
+                    trustStorePasswordField.setText(p.trustStorePassword() == null ? "" : p.trustStorePassword());
+                    keyStoreField.setText(p.keyStorePath() == null ? "" : p.keyStorePath());
+                    keyStorePasswordField.setText(p.keyStorePassword() == null ? "" : p.keyStorePassword());
                     savePasswordBox.setSelected(p.persistPassword());
                 });
     }
@@ -148,6 +220,28 @@ public final class ConnectionDialog extends Dialog<ConnectionProfile> {
                                 ? be.getMessage()
                                 : "Connection failed: " + cause.getMessage();
                         statusLabel.setText(message);
+                        if (cause instanceof BrokerException be && be.isAccessDenied()
+                                && message.contains("ActiveMQ.Advisory")) {
+                            Alert info = new Alert(Alert.AlertType.INFORMATION);
+                            info.setTitle("Argus - connect failed");
+                            info.setHeaderText("You do not have permission to list queues on this broker");
+                            info.setContentText("The connected user lacks the broker permissions required "
+                                    + "for destination listing, so the connection could not be completed. "
+                                    + "You can still switch protocol to Core or ask the broker admin for "
+                                    + "listing permissions."
+                                    + System.lineSeparator() + System.lineSeparator()
+                                    + "Reported by broker: " + message);
+                            info.initModality(javafx.stage.Modality.APPLICATION_MODAL);
+                            try {
+                                if (getDialogPane().getScene() != null
+                                        && getDialogPane().getScene().getWindow() != null) {
+                                    info.initOwner(getDialogPane().getScene().getWindow());
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                            info.show();
+                            return;
+                        }
                         Alert alert = new Alert(Alert.AlertType.ERROR);
                         alert.setTitle("Argus - connection failed");
                         alert.setHeaderText(null);
@@ -164,6 +258,7 @@ public final class ConnectionDialog extends Dialog<ConnectionProfile> {
                         return;
                     }
                     createdClient.set(client);
+                    connectedProfile = profile.get();
                     try {
                         ConnectionProfile persisted = profile.get();
                         if (!persisted.persistPassword()) {
@@ -208,11 +303,23 @@ public final class ConnectionDialog extends Dialog<ConnectionProfile> {
                 userField.getText().trim(),
                 password,
                 sslBox.isSelected(),
-                persistPassword));
+                persistPassword,
+                blankToNull(trustStoreField.getText()),
+                blankToNull(trustStorePasswordField.getText()),
+                blankToNull(keyStoreField.getText()),
+                blankToNull(keyStorePasswordField.getText())));
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     public BrokerClient createdClient() {
         return createdClient.get();
+    }
+
+    public ConnectionProfile connectedProfile() {
+        return connectedProfile;
     }
 
     public void shutdownExecutor() {

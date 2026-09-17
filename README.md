@@ -2,8 +2,8 @@
 
 A cross-platform desktop client for **ActiveMQ Artemis**. Connect with an authenticated
 user over the **Core** or **OpenWire** protocol, list addresses and queues, browse
-queue contents, inspect message headers/properties/bodies and send messages —
-**without JMX**.
+queue contents, subscribe to multicast (topic) addresses to watch messages live,
+inspect message headers/properties/bodies and send messages — **without JMX**.
 
 ![Argus browsing a queue](docs/images/screenshot.png)
 
@@ -20,7 +20,9 @@ broker's native protocols only, which means it:
 
 - Saved connection profiles (Core or OpenWire, SSL support)
 - Address tree with routing types, queues, message counts and consumer counts
+- Manually add addresses (plus an optional queue) to the tree when listing is not permitted
 - Queue browsing with message-count limits and optional JMS selectors
+- Live subscriptions to multicast (topic) addresses with optional selectors
 - Message inspector: headers, properties, body (JSON-friendly text, hex for binary)
 - Send messages (text or bytes, custom properties) to queues or topics
 - Graceful handling of permissions: inaccessible queues are reported, not hidden
@@ -39,6 +41,7 @@ broker's native protocols only, which means it:
 | Installation (Windows/macOS/Linux) | [docs/installation.md](docs/installation.md) |
 | Connecting: profiles, protocol choice, SSL | [docs/connecting.md](docs/connecting.md) |
 | Browsing queues and message details | [docs/browsing.md](docs/browsing.md) |
+| Subscribing to multicast (topic) addresses | [docs/browsing.md](docs/browsing.md) |
 | Sending messages | [docs/sending.md](docs/sending.md) |
 | Broker permissions required | [docs/permissions.md](docs/permissions.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
@@ -46,9 +49,12 @@ broker's native protocols only, which means it:
 
 ## Known limitations
 
-- Listing of addresses requires the `manage` permission on the
-  `activemq.management` address. Without it, use manual queue entry (see
-  `docs/permissions.md`).
+- Subscriptions are non-durable: messages arrive only while Argus is subscribed, and the
+  broker-side subscription queue is deleted when the subscription is stopped.
+- Listing of addresses requires `send` + `manage` on the `activemq.management` address,
+  plus the regular temporary-queue permissions any JMS client needs. Without them,
+  Argus shows an information box; use manual entry via the **Add address** button
+  (see `docs/permissions.md`).
 - In OpenWire mode, destination listing relies on Artemis destination advisories
   (`supportAdvisory=true` on the acceptor). Queue statistics are not available in
   OpenWire mode (no native, JMX-free primitive).

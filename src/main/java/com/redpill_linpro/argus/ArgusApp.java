@@ -1,7 +1,8 @@
 package com.redpill_linpro.argus;
 
 import java.io.IOException;
-import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.redpill_linpro.argus.broker.BrokerClient;
 import com.redpill_linpro.argus.config.ProfileStore;
@@ -22,26 +23,48 @@ public class ArgusApp extends Application {
 
     @Override
     public void start(Stage stage) {
-        ConnectionDialog dialog = new ConnectionDialog(profileStore);
-        Optional<ConnectionProfile> profile = dialog.showAndWait();
-        dialog.shutdownExecutor();
-        BrokerClient client = dialog.createdClient();
-        if (profile.isEmpty() || client == null) {
-            Platform.exit();
-            return;
-        }
-        try {
-            openMainWindow(stage, profile.get(), client);
-        } catch (IOException e) {
-            Platform.exit();
+        Platform.setImplicitExit(false);
+        while (true) {
+            AtomicReference<BrokerClient> clientOut = new AtomicReference<>();
+            ConnectionProfile profile = connect(clientOut);
+            BrokerClient client = clientOut.get();
+            if (profile == null || client == null) {
+                Platform.exit();
+                return;
+            }
+            AtomicBoolean disconnected = new AtomicBoolean(false);
+            Stage mainWindow = new Stage();
+            try {
+                openMainWindow(mainWindow, profile, client, () -> {
+                    disconnected.set(true);
+                    mainWindow.hide();
+                });
+            } catch (IOException e) {
+                Platform.exit();
+                return;
+            }
+            if (!disconnected.get()) {
+                Platform.exit();
+                return;
+            }
         }
     }
 
-    private void openMainWindow(Stage stage, ConnectionProfile profile, BrokerClient client) throws IOException {
+    private ConnectionProfile connect(AtomicReference<BrokerClient> clientOut) {
+        ConnectionDialog dialog = new ConnectionDialog(profileStore);
+        dialog.showAndWait();
+        dialog.shutdownExecutor();
+        clientOut.set(dialog.createdClient());
+        return dialog.connectedProfile();
+    }
+
+    private void openMainWindow(Stage stage, ConnectionProfile profile, BrokerClient client,
+            Runnable onDisconnected) throws IOException {
         FXMLLoader loader = new FXMLLoader(MainController.class.getResource("main-view.fxml"));
         Parent root = loader.load();
         MainController controller = loader.getController();
         controller.init(profile, client);
+        controller.setOnDisconnected(onDisconnected);
 
         Scene scene = new Scene(root, 1280, 800);
         var css = MainController.class.getResource("styles.css");
@@ -50,11 +73,8 @@ public class ArgusApp extends Application {
         }
         stage.setTitle("Argus - " + profile.name() + " (" + profile.displayUrl() + ")");
         stage.setScene(scene);
-        stage.setOnCloseRequest(event -> {
-            controller.shutdown();
-            Platform.exit();
-        });
-        stage.show();
+        stage.setOnCloseRequest(event -> controller.shutdown());
+        stage.showAndWait();
     }
 
     public static void main(String[] args) {

@@ -8,9 +8,11 @@ import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.redpill_linpro.argus.broker.BrokerClient;
 import com.redpill_linpro.argus.broker.BrokerException;
+import com.redpill_linpro.argus.broker.Subscription;
 import com.redpill_linpro.argus.model.AddressInfo;
 import com.redpill_linpro.argus.model.ConnectionProfile;
 import com.redpill_linpro.argus.model.DestinationType;
@@ -37,6 +39,7 @@ import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleButton;
 import javafx.scene.control.TreeCell;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
@@ -52,6 +55,8 @@ public class MainController {
     @FXML
     private Button refreshButton;
     @FXML
+    private Button addAddressButton;
+    @FXML
     private Button disconnectButton;
     @FXML
     private Label connectionLabel;
@@ -61,6 +66,10 @@ public class MainController {
     private Spinner<Integer> maxMessagesSpinner;
     @FXML
     private TextField selectorField;
+    @FXML
+    private Button subscribeButton;
+    @FXML
+    private ToggleButton autoRefreshButton;
     @FXML
     private TableView<MessageSnapshot> messagesTable;
     @FXML
@@ -133,14 +142,35 @@ public class MainController {
 
     private QueueInfo lastQueueSelection;
     private String lastSelectedAddressName;
+    private final Map<String, String> manualAddresses = new java.util.LinkedHashMap<>();
+    private Runnable onDisconnected;
+
+    public void setOnDisconnected(Runnable onDisconnected) {
+        this.onDisconnected = onDisconnected;
+    }
     private final javafx.animation.PauseTransition destinationResolveDelay =
             new javafx.animation.PauseTransition(javafx.util.Duration.millis(400));
+
+    private SelectedQueue browsedQueue;
+    private long lastSeenCount = Long.MIN_VALUE;
+    private final AtomicBoolean pollInFlight = new AtomicBoolean(false);
+    private final javafx.animation.Timeline autoRefreshTimer = new javafx.animation.Timeline(
+            new javafx.animation.KeyFrame(javafx.util.Duration.seconds(3), e -> autoRefreshTick()));
+
+    private Subscription subscription;
+    private String subscribedAddress;
+    private long subscribedCount;
 
     public void init(ConnectionProfile profile, BrokerClient client) {
         this.profile = profile;
         this.client = client;
         onRefreshAddresses();
-        connectionLabel.setText(client.brokerInfo() + " / " + profile.displayUrl());
+        connectionLabel.setText(profile.displayUrl());
+        executor.call(client::brokerInfo).whenComplete((info, error) -> Platform.runLater(() -> {
+            if (info != null) {
+                connectionLabel.setText(info + " / " + profile.displayUrl());
+            }
+        }));
     }
 
     @FXML
@@ -199,6 +229,23 @@ public class MainController {
                 scheduleDestinationTypeResolve();
             }
         });
+
+        autoRefreshTimer.setCycleCount(javafx.animation.Animation.INDEFINITE);
+        autoRefreshButton.selectedProperty().addListener((obs, was, on) -> {
+            if (on && browsedQueue != null) {
+                autoRefreshTick();
+            }
+            updateAutoRefreshTimer();
+        });
+        autoRefreshButton.setDisable(true);
+    }
+
+    private void updateAutoRefreshTimer() {
+        if (autoRefreshButton.isSelected()) {
+            autoRefreshTimer.playFromStart();
+        } else {
+            autoRefreshTimer.stop();
+        }
     }
 
     private void scheduleDestinationTypeResolve() {
@@ -250,6 +297,8 @@ public class MainController {
         TreeItem<Object> item = tree.getSelectionModel().getSelectedItem();
         if (item != null && item.getValue() instanceof QueueInfo) {
             onBrowse();
+        } else if (item != null && subscribeTarget() != null) {
+            onToggleSubscribe();
         }
     }
 
@@ -270,6 +319,7 @@ public class MainController {
             lastQueueSelection = queue;
             lastSelectedAddressName = queue.address();
         }
+        updateSubscribeButton();
     }
 
     private void loadAddressDetails(AddressInfo address) {
@@ -311,7 +361,13 @@ public class MainController {
         tree.setRoot(root);
         executor.call(client::listAddresses).whenComplete((addresses, error) -> Platform.runLater(() -> {
             if (error != null) {
-                showError(addressesError(error));
+                Throwable cause = error.getCause() != null ? error.getCause() : error;
+                if (cause instanceof BrokerException be && be.isAccessDenied()) {
+                    showListingDenied(addressesError(error));
+                } else {
+                    showError(addressesError(error));
+                }
+                reattachManualAddresses(root);
                 return;
             }
             root.getChildren().clear();
@@ -323,6 +379,7 @@ public class MainController {
                 }
                 root.getChildren().add(addressItem);
             }
+            reattachManualAddresses(root);
             if (lastSelectedAddressName != null && lastQueueSelection == null) {
                 for (TreeItem<Object> addressItem : root.getChildren()) {
                     if (addressItem.getValue() instanceof AddressInfo info
@@ -340,6 +397,10 @@ public class MainController {
         Throwable cause = error.getCause() != null ? error.getCause() : error;
         String base = "Failed to list addresses: " + cause.getMessage();
         if (cause instanceof BrokerException be && be.isAccessDenied()) {
+            if (client instanceof com.redpill_linpro.argus.broker.OpenWireBrokerClient) {
+                return base + " (needs createNonDurableQueue/consume permission on "
+                        + "ActiveMQ.Advisory.#; enter destination names manually)";
+            }
             return base + " (needs 'manage' permission on " + "activemq.management"
                     + "; you can still browse by entering a queue name manually)";
         }
@@ -347,6 +408,85 @@ public class MainController {
             return base + " (destination advisories unavailable; enter destination names manually)";
         }
         return base;
+    }
+
+    @FXML
+    private void onAddAddress() {
+        if (client == null || tree.getRoot() == null) {
+            statusLabel.setText("Connect to a broker before adding addresses");
+            return;
+        }
+        AddAddressDialog.Result result = new AddAddressDialog().showAndWait().orElse(null);
+        if (result == null) {
+            return;
+        }
+        String address = result.address() == null ? "" : result.address().trim();
+        if (address.isEmpty()) {
+            statusLabel.setText("Address name required");
+            return;
+        }
+        String queue = result.queue() == null ? "" : result.queue().trim();
+        manualAddresses.put(address, queue);
+        TreeItem<Object> addressItem = attachManualAddress(tree.getRoot(), address, queue);
+        selectManualEntry(addressItem);
+        statusLabel.setText("Added '" + address + "' manually to the tree");
+    }
+
+    void addManualDestination(String address, String queue) {
+        if (tree.getRoot() == null) {
+            statusLabel.setText("Connect to a broker before adding addresses");
+            return;
+        }
+        manualAddresses.put(address, queue == null ? "" : queue);
+        TreeItem<Object> addressItem = attachManualAddress(tree.getRoot(), address, queue == null ? "" : queue);
+        selectManualEntry(addressItem);
+        statusLabel.setText("Added '" + address + "' manually to the tree");
+    }
+
+    private TreeItem<Object> attachManualAddress(TreeItem<Object> root, String address, String queue) {
+        for (TreeItem<Object> child : root.getChildren()) {
+            if (child.getValue() instanceof AddressInfo info && info.name().equals(address)) {
+                ensureManualQueueChild(child, address, queue);
+                return child;
+            }
+        }
+        TreeItem<Object> addressItem = new TreeItem<>(new AddressInfo(address, List.of("MANUAL")));
+        if (!queue.isEmpty()) {
+            addressItem.getChildren().add(new TreeItem<>(
+                    new QueueInfo(queue, address, "ANYCAST", -1, -1, true)));
+        }
+        attachLazyQueues(addressItem, new AddressInfo(address, List.of("MANUAL")));
+        root.getChildren().add(addressItem);
+        return addressItem;
+    }
+
+    private void ensureManualQueueChild(TreeItem<Object> addressItem, String address, String queue) {
+        if (queue.isEmpty()) {
+            return;
+        }
+        boolean present = addressItem.getChildren().stream()
+                .anyMatch(item -> item.getValue() instanceof QueueInfo q && q.name().equals(queue));
+        if (!present) {
+            addressItem.getChildren().add(new TreeItem<>(
+                    new QueueInfo(queue, address, "ANYCAST", -1, -1, true)));
+        }
+    }
+
+    private void selectManualEntry(TreeItem<Object> addressItem) {
+        TreeItem<Object> target = addressItem;
+        for (TreeItem<Object> child : addressItem.getChildren()) {
+            if (child.getValue() instanceof QueueInfo) {
+                target = child;
+                break;
+            }
+        }
+        tree.getSelectionModel().select(target);
+    }
+
+    private void reattachManualAddresses(TreeItem<Object> root) {
+        for (Map.Entry<String, String> entry : manualAddresses.entrySet()) {
+            attachManualAddress(root, entry.getKey(), entry.getValue());
+        }
     }
 
     private void attachLazyQueues(TreeItem<Object> addressItem, AddressInfo address) {
@@ -363,6 +503,12 @@ public class MainController {
                 Platform.runLater(() -> {
                     if (error != null) {
                         Throwable cause = error.getCause() != null ? error.getCause() : error;
+                        if (cause instanceof BrokerException be && be.isAccessDenied()) {
+                            addressItem.getChildren().setAll(new TreeItem<>("(listing not permitted)"));
+                            statusLabel.setText("Queue listing not permitted for '" + addressName
+                                    + "'; manual entries remain browsable");
+                            return;
+                        }
                         showError("Failed to list queues for '" + addressName + "': " + cause.getMessage());
                         return;
                     }
@@ -407,21 +553,71 @@ public class MainController {
             statusLabel.setText("Double-click a queue in the tree to browse it");
             return;
         }
+        stopSubscription();
         int max = maxMessagesSpinner.getValue();
         String selector = selectorField.getText();
-        browseQueueLabel.setText(selected.address() + " :: " + selected.queueName());
-        statusLabel.setText("Browsing " + selected.queueName() + "...");
-        executor.call(() -> client.browse(selected.address(), selected.queueName(), max, blankToNull(selector)))
+        SelectedQueue target = new SelectedQueue(selected.queueName(), selected.address(), max, blankToNull(selector));
+        browseQueueLabel.setText(target.address() + " :: " + target.queueName());
+        statusLabel.setText("Browsing " + target.queueName() + "...");
+        executor.call(() -> client.browse(target.address(), target.queueName(), target.maxMessages(), target.selector()))
                 .whenComplete((messages, error) -> Platform.runLater(() -> {
                     if (error != null) {
-                        showError(browseError(error, selected));
+                        showError(browseError(error, target));
                         return;
                     }
-                    messagesTable.getItems().setAll(messages);
-                    showMessage(null);
-                    statusLabel.setText(messages.size() + " messages on "
-                            + selected.address() + " :: " + selected.queueName());
+                    browsedQueue = target;
+                    lastSeenCount = Long.MIN_VALUE;
+                    autoRefreshButton.setDisable(false);
+                    if (autoRefreshButton.isSelected()) {
+                        updateAutoRefreshTimer();
+                    }
+                    applyMessages(target, messages);
                 }));
+    }
+
+    private void applyMessages(SelectedQueue target, List<MessageSnapshot> messages) {
+        messagesTable.getItems().setAll(messages);
+        showMessage(null);
+        statusLabel.setText(messages.size() + " messages on "
+                + target.address() + " :: " + target.queueName());
+    }
+
+    private void autoRefreshTick() {
+        if (pollInFlight.get() || subscription != null) {
+            return;
+        }
+        SelectedQueue target = browsedQueue;
+        if (target == null || client == null) {
+            return;
+        }
+        pollInFlight.set(true);
+        executor.call(() -> {
+            boolean countKnown = target.selector() == null
+                    && profile.protocol() == com.redpill_linpro.argus.model.Protocol.CORE;
+            long count = countKnown ? client.messageCount(target.address(), target.queueName()) : Long.MIN_VALUE;
+            boolean refreshNeeded = count == Long.MIN_VALUE || count != lastSeenCount;
+            List<MessageSnapshot> messages = refreshNeeded
+                    ? client.browse(target.address(), target.queueName(), target.maxMessages(), target.selector())
+                    : null;
+            return new AutoRefreshResult(count, messages);
+        }).whenComplete((result, error) -> Platform.runLater(() -> {
+            pollInFlight.set(false);
+            if (error != null) {
+                Throwable cause = error.getCause() != null ? error.getCause() : error;
+                statusLabel.setText("Auto-refresh failed: " + cause.getMessage());
+                autoRefreshButton.setSelected(false);
+                return;
+            }
+            if (result.count() != Long.MIN_VALUE) {
+                lastSeenCount = result.count();
+            }
+            if (result.messages() != null) {
+                applyMessages(target, result.messages());
+            }
+        }));
+    }
+
+    private record AutoRefreshResult(long count, List<MessageSnapshot> messages) {
     }
 
     private String browseError(Throwable error, SelectedQueue selected) {
@@ -431,6 +627,110 @@ public class MainController {
                     + "' (needs 'browse' permission on the queue)";
         }
         return "Browse failed: " + cause.getMessage();
+    }
+
+    private AddressInfo subscribeTarget() {
+        TreeItem<Object> item = tree.getSelectionModel().getSelectedItem();
+        if (item == null) {
+            return null;
+        }
+        Object value = item.getValue();
+        if (value instanceof AddressInfo address && address.routingTypes().contains("MULTICAST")) {
+            return address;
+        }
+        if (value instanceof QueueInfo queue && "MULTICAST".equals(queue.routingType())) {
+            return new AddressInfo(queue.address(), List.of(queue.routingType()));
+        }
+        return null;
+    }
+
+    private void updateSubscribeButton() {
+        AddressInfo target = subscribeTarget();
+        if (subscription != null && (target == null || target.name().equals(subscribedAddress))) {
+            subscribeButton.setText("Unsubscribe");
+            subscribeButton.setDisable(false);
+        } else if (target != null) {
+            subscribeButton.setText("Subscribe");
+            subscribeButton.setDisable(false);
+        } else {
+            subscribeButton.setText("Subscribe");
+            subscribeButton.setDisable(true);
+        }
+    }
+
+    @FXML
+    private void onToggleSubscribe() {
+        AddressInfo target = subscribeTarget();
+        if (subscription != null && (target == null || target.name().equals(subscribedAddress))) {
+            stopSubscription();
+            return;
+        }
+        if (target == null) {
+            statusLabel.setText("Select a multicast address in the tree to subscribe");
+            return;
+        }
+        startSubscribe(target.name(), blankToNull(selectorField.getText()));
+    }
+
+    private void startSubscribe(String address, String selector) {
+        stopSubscription();
+        statusLabel.setText("Subscribing to '" + address + "'...");
+        subscribeButton.setDisable(true);
+        messagesTable.getItems().clear();
+        showMessage(null);
+        executor.call(() -> client.subscribe(address, selector, this::onSubscribedMessage))
+                .whenComplete((sub, error) -> Platform.runLater(() -> {
+                    if (error != null) {
+                        showError(subscribeError(error, address));
+                        updateSubscribeButton();
+                        return;
+                    }
+                    subscription = sub;
+                    subscribedAddress = address;
+                    subscribedCount = 0;
+                    browseQueueLabel.setText(address + " (live)");
+                    autoRefreshButton.setSelected(false);
+                    autoRefreshButton.setDisable(true);
+                    statusLabel.setText("Subscribed to '" + address + "' - waiting for messages");
+                    updateSubscribeButton();
+                }));
+    }
+
+    private void stopSubscription() {
+        Subscription current = subscription;
+        subscription = null;
+        subscribedAddress = null;
+        subscribedCount = 0;
+        if (current != null) {
+            executor.call(() -> {
+                current.close();
+                return null;
+            });
+        }
+        autoRefreshButton.setDisable(browsedQueue == null);
+        updateSubscribeButton();
+    }
+
+    private void onSubscribedMessage(MessageSnapshot message) {
+        Platform.runLater(() -> {
+            if (subscription == null) {
+                return;
+            }
+            subscribedCount++;
+            javafx.collections.ObservableList<MessageSnapshot> items = messagesTable.getItems();
+            items.add(message);
+            int max = maxMessagesSpinner.getValue();
+            while (items.size() > max) {
+                items.remove(0);
+            }
+            statusLabel.setText(subscribedCount + (subscribedCount == 1 ? " message from '" : " messages from '")
+                    + subscribedAddress + "'");
+        });
+    }
+
+    private String subscribeError(Throwable error, String address) {
+        Throwable cause = error.getCause() != null ? error.getCause() : error;
+        return "Subscribe to '" + address + "' failed: " + cause.getMessage();
     }
 
     private void showMessage(MessageSnapshot message) {
@@ -530,9 +830,12 @@ public class MainController {
     @FXML
     private void onDisconnect() {
         shutdown();
+        if (onDisconnected != null) {
+            onDisconnected.run();
+            return;
+        }
         Stage stage = (Stage) disconnectButton.getScene().getWindow();
         stage.close();
-        Platform.exit();
     }
 
     private SelectedQueue selectedQueue() {
@@ -541,7 +844,7 @@ public class MainController {
             Object value = item.getValue();
             if (value instanceof QueueInfo queue) {
                 lastQueueSelection = queue;
-                return new SelectedQueue(queue.name(), queue.address());
+                return new SelectedQueue(queue.name(), queue.address(), -1, null);
             }
             if (value instanceof AddressInfo) {
                 QueueInfo firstQueue = item.getChildren().stream()
@@ -550,17 +853,17 @@ public class MainController {
                         .findFirst().orElse(null);
                 if (firstQueue != null) {
                     lastQueueSelection = firstQueue;
-                    return new SelectedQueue(firstQueue.name(), firstQueue.address());
+                    return new SelectedQueue(firstQueue.name(), firstQueue.address(), -1, null);
                 }
             }
         }
         if (lastQueueSelection != null) {
-            return new SelectedQueue(lastQueueSelection.name(), lastQueueSelection.address());
+            return new SelectedQueue(lastQueueSelection.name(), lastQueueSelection.address(), -1, null);
         }
         return null;
     }
 
-    private record SelectedQueue(String queueName, String address) {
+    private record SelectedQueue(String queueName, String address, int maxMessages, String selector) {
     }
 
     private static String summarize(Map<String, Object> properties) {
@@ -602,13 +905,29 @@ public class MainController {
 
     private void showError(String message) {
         setStatusError(message);
+        showAlert(Alert.AlertType.ERROR, "Argus", null, message);
+    }
+
+    private void showListingDenied(String detail) {
+        String summary = "You do not have permission to list queues on this broker. You can still "
+                + "send messages, subscribe and browse a known queue by entering its destination "
+                + "manually on the Send tab.";
+        setStatusError(summary + System.lineSeparator() + detail);
+        String reported = truncate(detail);
+        showAlert(Alert.AlertType.INFORMATION, "Argus - listing not permitted",
+                "You do not have permission to list queues on this broker",
+                summary + System.lineSeparator() + System.lineSeparator()
+                        + "Reported by broker: " + reported);
+    }
+
+    private void showAlert(Alert.AlertType type, String title, String headerText, String contentText) {
         if ("false".equalsIgnoreCase(System.getProperty("argus.ui.errorDialogs"))) {
             return;
         }
-        Alert alert = new Alert(Alert.AlertType.ERROR);
-        alert.setTitle("Argus");
-        alert.setHeaderText(null);
-        alert.setContentText(message);
+        Alert alert = new Alert(type);
+        alert.setTitle(title);
+        alert.setHeaderText(headerText);
+        alert.setContentText(contentText);
         alert.initModality(Modality.APPLICATION_MODAL);
         try {
             var scene = statusLabel.getScene();
@@ -621,12 +940,23 @@ public class MainController {
     }
 
     public void shutdown() {
-        executor.shutdown();
-        if (client != null) {
-            try {
-                client.close();
-            } catch (Exception ignored) {
-            }
+        autoRefreshTimer.stop();
+        Subscription current = subscription;
+        subscription = null;
+        subscribedAddress = null;
+        if (current != null) {
+            executor.call(() -> {
+                current.close();
+                return null;
+            });
         }
+        BrokerClient closable = client;
+        if (closable != null) {
+            executor.call(() -> {
+                closable.close();
+                return null;
+            });
+        }
+        executor.shutdown();
     }
 }

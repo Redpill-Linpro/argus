@@ -13,6 +13,7 @@
 <?import javafx.scene.control.TableView?>
 <?import javafx.scene.control.TextArea?>
 <?import javafx.scene.control.TextField?>
+<?import javafx.scene.control.ToggleButton?>
 <?import javafx.scene.control.ToggleGroup?>
 <?import javafx.scene.control.ToolBar?>
 <?import javafx.scene.control.TreeView?>
@@ -27,23 +28,27 @@
     </padding>
     <ToolBar>
         <Button fx:id="refreshButton" text="Refresh addresses" onAction="#onRefreshAddresses"/>
+        <Button fx:id="addAddressButton" text="Add address" onAction="#onAddAddress"/>
         <Button fx:id="disconnectButton" text="Disconnect" onAction="#onDisconnect"/>
         <Label fx:id="connectionLabel"/>
     </ToolBar>
     <SplitPane VBox.vgrow="ALWAYS">
         <TreeView fx:id="tree" minWidth="280" prefWidth="340"/>
         <TabPane>
-            <Tab text="Browse" closable="false">
+            <Tab text="Subscribe" closable="false">
                 <VBox spacing="6">
                     <padding>
                         <Insets top="6" right="6" bottom="6" left="6"/>
                     </padding>
                     <HBox spacing="6" alignment="CENTER_LEFT">
-                        <Label text="Queue (browsed):"/>
+                        <Label text="Target:"/>
                         <Label fx:id="browseQueueLabel" text="-"/>
                         <Label text="Max:"/>
                         <Spinner fx:id="maxMessagesSpinner" prefWidth="110" editable="true"/>
                         <TextField fx:id="selectorField" promptText="JMS selector (optional)" HBox.hgrow="ALWAYS"/>
+                        <Button fx:id="subscribeButton" text="Subscribe" onAction="#onToggleSubscribe" disable="true"/>
+                        <ToggleButton fx:id="autoRefreshButton" text="Auto-refresh" selected="true"
+                                      mnemonicParsing="false"/>
                     </HBox>
                     <SplitPane orientation="VERTICAL" VBox.vgrow="ALWAYS">
                         <TableView fx:id="messagesTable">
@@ -57,7 +62,7 @@
                                 <TableColumn fx:id="colBody" text="Body" prefWidth="340"/>
                             </columns>
                             <placeholder>
-                                <Label text="Select a queue and press Browse"/>
+                                <Label text="Select a queue and Browse, or a multicast address and Subscribe"/>
                             </placeholder>
                         </TableView>
                         <VBox spacing="6">

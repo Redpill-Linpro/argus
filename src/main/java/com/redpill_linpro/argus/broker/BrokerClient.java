@@ -23,6 +23,12 @@ public interface BrokerClient extends AutoCloseable {
     List<QueueInfo> listQueues(String address);
 
     /**
+     * Current message count of a queue, or a negative number when it cannot be
+     * determined (e.g. OpenWire mode). Used by the browse auto-refresh.
+     */
+    long messageCount(String address, String queueName);
+
+    /**
      * Browse up to {@code maxMessages} messages (null = unlimited) using an optional
      * JMS selector (null/blank = none). Purely read-only.
      */
@@ -36,6 +42,16 @@ public interface BrokerClient extends AutoCloseable {
      * destination is unknown (e.g. not created yet) or ambiguous.
      */
     java.util.Optional<DestinationType> resolveDestinationType(String destination);
+
+    /**
+     * Starts a live, non-durable subscription on the (multicast) address and
+     * delivers every received message to {@code listener}, which runs on a
+     * broker delivery thread and must marshal UI updates itself. Null/blank
+     * selector means no filtering. {@code createNonDurableQueue} and
+     * {@code consume} permissions are required on the address.
+     */
+    Subscription subscribe(String address, String selector,
+            java.util.function.Consumer<com.redpill_linpro.argus.model.MessageSnapshot> listener);
 
     boolean isOpen();
 

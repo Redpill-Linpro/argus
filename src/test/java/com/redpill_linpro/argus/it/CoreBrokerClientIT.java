@@ -3,11 +3,15 @@ package com.redpill_linpro.argus.it;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -20,6 +24,7 @@ import org.apache.activemq.artemis.core.server.ActiveMQServer;
 
 import com.redpill_linpro.argus.broker.BrokerException;
 import com.redpill_linpro.argus.broker.CoreBrokerClient;
+import com.redpill_linpro.argus.broker.Subscription;
 import com.redpill_linpro.argus.model.AddressInfo;
 import com.redpill_linpro.argus.model.ConnectionProfile;
 import com.redpill_linpro.argus.model.MessageDraft;
@@ -55,8 +60,8 @@ class CoreBrokerClientIT {
             List<AddressInfo> addresses = client.listAddresses();
             List<String> names = addresses.stream().map(AddressInfo::name).toList();
             assertTrue(names.contains("TEST"), "expected TEST in " + names);
-            assertTrue(names.stream().anyMatch(n -> n.startsWith("activemq.management")),
-                    "expected management infrastructure address in " + names);
+            assertTrue(names.stream().anyMatch(n -> n.startsWith("argus-reply-")),
+                    "expected temporary management reply queue address in " + names);
 
             List<QueueInfo> queues = client.listQueues("TEST");
             assertEquals(1, queues.size());
@@ -137,6 +142,87 @@ class CoreBrokerClientIT {
             }
         }
         assertFalse(serverStateBroken());
+    }
+
+    @Test
+    @Order(6)
+    void subscribesToMulticastAddressAndReceivesLiveMessages() throws Exception {
+        try (CoreBrokerClient client = new CoreBrokerClient(profile("argus", "arguspw"))) {
+            BlockingQueue<MessageSnapshot> received = new LinkedBlockingQueue<>();
+            Subscription sub = client.subscribe("TESTM", null, received::add);
+            try {
+                client.send("TESTM", com.redpill_linpro.argus.model.DestinationType.TOPIC,
+                        new MessageDraft(MessageDraft.Kind.TEXT, "live-1", Map.of("ord", "1")));
+                client.send("TESTM", com.redpill_linpro.argus.model.DestinationType.TOPIC,
+                        new MessageDraft(MessageDraft.Kind.TEXT, "live-2", Map.of("ord", "2")));
+                MessageSnapshot first = received.poll(10, TimeUnit.SECONDS);
+                assertNotNull(first, "expected a live topic message");
+                assertEquals("live-1", first.body());
+                MessageSnapshot second = received.poll(10, TimeUnit.SECONDS);
+                assertNotNull(second, "expected the second live topic message");
+                assertEquals("live-2", second.body());
+            } finally {
+                sub.close();
+            }
+        }
+        try (CoreBrokerClient client = new CoreBrokerClient(profile("argus", "arguspw"))) {
+            List<QueueInfo> queues = client.listQueues("TESTM");
+            long deadline = System.currentTimeMillis() + 10_000;
+            while (!queues.isEmpty() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(200);
+                queues = client.listQueues("TESTM");
+            }
+            assertTrue(queues.isEmpty(), "non-durable subscription must not leave queues behind: " + queues);
+        }
+    }
+
+    @Test
+    @Order(7)
+    void subscribesWithSelector() throws Exception {
+        try (CoreBrokerClient client = new CoreBrokerClient(profile("argus", "arguspw"))) {
+            BlockingQueue<MessageSnapshot> received = new LinkedBlockingQueue<>();
+            Subscription sub = client.subscribe("TESTM", "ord = 'keep'", received::add);
+            try {
+                client.send("TESTM", com.redpill_linpro.argus.model.DestinationType.TOPIC,
+                        new MessageDraft(MessageDraft.Kind.TEXT, "dropped", Map.of("ord", "drop")));
+                client.send("TESTM", com.redpill_linpro.argus.model.DestinationType.TOPIC,
+                        new MessageDraft(MessageDraft.Kind.TEXT, "kept", Map.of("ord", "keep")));
+                MessageSnapshot only = received.poll(10, TimeUnit.SECONDS);
+                assertNotNull(only, "expected the message matching the selector");
+                assertEquals("kept", only.body());
+                assertNull(received.poll(1, TimeUnit.SECONDS), "selector-filtered messages must not arrive");
+            } finally {
+                sub.close();
+            }
+        }
+    }
+
+    @Test
+    @Order(8)
+    void repeatedListingReusesSingleReplyQueue() throws Exception {
+        try (CoreBrokerClient first = new CoreBrokerClient(profile("argus", "arguspw"))) {
+            first.listAddresses();
+            first.listAddresses();
+            try (CoreBrokerClient second = new CoreBrokerClient(profile("argus", "arguspw"))) {
+                List<AddressInfo> listed = second.listAddresses();
+                long replyQueues = listed.stream()
+                        .map(AddressInfo::name)
+                        .filter(name -> name.startsWith("argus-reply-"))
+                        .count();
+                assertEquals(2, replyQueues,
+                        "each connection must hold exactly one reply queue: " + listed);
+            }
+        }
+        try (CoreBrokerClient probe = new CoreBrokerClient(profile("argus", "arguspw"))) {
+            List<AddressInfo> listed = probe.listAddresses();
+            long replyQueues = listed.stream()
+                    .map(AddressInfo::name)
+                    .filter(name -> name.startsWith("argus-reply-"))
+                    .count();
+            assertTrue(replyQueues <= 1,
+                    "closed connections must not leave reply queues behind (probe's own reply queue is at most one): "
+                            + listed);
+        }
     }
 
     private boolean serverStateBroken() {
